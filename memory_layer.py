@@ -5,6 +5,7 @@ try:
 except ImportError:
     from typing_extensions import Literal
 import json
+import re
 from datetime import datetime
 import uuid
 from rank_bm25 import BM25Okapi
@@ -44,25 +45,38 @@ class OpenAIController(BaseLLMController):
             # 支持自定义API端点（如OpenRouter）
             client_kwargs = {"api_key": api_key}
             if api_base:
+                # Strip trailing slash and add /api/v1 for OpenRouter compatibility
+                api_base = api_base.rstrip('/')
+                if "openrouter" in api_base.lower() and "/api/v1" not in api_base:
+                    api_base = api_base + "/api/v1"
                 client_kwargs["base_url"] = api_base
             elif os.getenv('OPENAI_BASE_URL'):
-                client_kwargs["base_url"] = os.getenv('OPENAI_BASE_URL')
+                env_base = os.getenv('OPENAI_BASE_URL').rstrip('/')
+                if "/api/v1" not in env_base:
+                    env_base = env_base + "/api/v1"
+                client_kwargs["base_url"] = env_base
             self.client = OpenAI(**client_kwargs)
         except ImportError:
             raise ImportError("OpenAI package not found. Install it with: pip install openai")
     
     def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You must respond with a JSON object."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format=response_format,
-            temperature=temperature,
-            max_tokens=1000
-        )
-        return response.choices[0].message.content
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You must respond with a JSON object."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=response_format,
+                temperature=temperature,
+                max_tokens=1000
+            )
+            if hasattr(response, 'choices'):
+                return response.choices[0].message.content
+            return str(response)
+        except Exception as e:
+            print(f"OpenAI get_completion error: {e}")
+            return ""
 
 class OllamaController(BaseLLMController):
     def __init__(self, model: str = "llama2"):
@@ -237,12 +251,14 @@ class LiteLLMController(BaseLLMController):
                 completion_args["api_key"] = self.api_key
                 
             response = completion(**completion_args)
-            return response.choices[0].message.content
+            if hasattr(response, 'choices'):
+                return response.choices[0].message.content
+            return str(response)
             
         except Exception as e:
             print(f"LiteLLM completion error: {e}")
             empty_response = self._generate_empty_response(response_format)
-            return json.dumps(empty_response)
+            return ""  # Return empty string, not JSON
 
 class LLMController:
     """LLM-based controller for memory metadata generation"""
@@ -292,10 +308,12 @@ class MemoryNote:
         if llm_controller and any(param is None for param in [keywords, context, category, tags]):
             analysis = self.analyze_content(content, llm_controller)
             print("analysis", analysis)
-            keywords = keywords or analysis["keywords"]
-            context = context or analysis["context"]
-            tags = tags or analysis["tags"]
-        
+            # Handle empty or failed analysis
+            if analysis:
+                keywords = keywords or analysis.get("keywords", [])
+                context = context or analysis.get("context", "General")
+                tags = tags or analysis.get("tags", [])
+
         # Set default values for optional parameters
         self.id = id or str(uuid.uuid4())
         self.keywords = keywords or []
@@ -316,8 +334,8 @@ class MemoryNote:
         self.tags = tags or []
 
     @staticmethod
-    def analyze_content(content: str, llm_controller: LLMController) -> Dict:            
-        """Analyze content to extract keywords, context, and other metadata"""
+    def analyze_content(content: str, llm_controller: LLMController) -> Dict:
+        """Analyze content to extract keywords, context, and other metadata (with retry)"""
         prompt = """Generate a structured analysis of the following content by:
             1. Identifying the most salient keywords (focus on nouns, verbs, and key concepts)
             2. Extracting core themes and contextual elements
@@ -331,7 +349,7 @@ class MemoryNote:
                     // Don't include keywords that are the name of the speaker or time
                     // At least three keywords, but don't be too redundant.
                 ],
-                "context": 
+                "context":
                     // one sentence summarizing:
                     // - Main topic/domain
                     // - Key arguments/points
@@ -346,8 +364,11 @@ class MemoryNote:
 
             Content for analysis:
             """ + content
-        try:
-            response = llm_controller.llm.get_completion(prompt,response_format={"type": "json_schema", "json_schema": {
+        response = ""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = llm_controller.llm.get_completion(prompt,response_format={"type": "json_schema", "json_schema": {
                         "name": "response",
                         "schema": {
                             "type": "object",
@@ -374,42 +395,40 @@ class MemoryNote:
                         "strict": True
                 }
             })
-            
-            # try:
-            #     # Clean the response in case there's extra text
-            #     response_cleaned = response.strip()
-            #     # Try to find JSON content if wrapped in other text
-            #     if not response_cleaned.startswith('{'):
-            #         start_idx = response_cleaned.find('{')
-            #         if start_idx != -1:
-            #             response_cleaned = response_cleaned[start_idx:]
-            #     if not response_cleaned.endswith('}'):
-            #         end_idx = response_cleaned.rfind('}')
-            #         if end_idx != -1:
-            #             response_cleaned = response_cleaned[:end_idx+1]
-            try:        
+
                 response = re.sub(r'^```json\s*|\s*```$', '', response, flags=re.MULTILINE).strip()
+                # Check if response is HTML error page
+                if response.startswith('<!DOCTYPE html>') or response.startswith('<html'):
+                    raise ValueError(f"API returned HTML error page: {response[:100]}...")
+                print(f"[DEBUG] Response after cleanup: {response[:100]}...")
+                if not response:
+                    raise ValueError("Empty response")
+                if not response.startswith('{'):
+                    # Find JSON start
+                    json_start = response.find('{')
+                    if json_start >= 0:
+                        response = response[json_start:]
                 analysis = json.loads(response)
-            except:
-                print(f"JSON parsing error in analyze_content: {e}")
-                print(f"Raw response: {response}")
-                analysis = {
-                    "keywords": [],
-                    "context": "General",
-                    "tags": []
-                }
-            
-            return analysis
-            
-        except Exception as e:
-            print(f"Error analyzing content: {str(e)}")
-            print(f"Raw response: {response}")
-            return {
-                "keywords": [],
-                "context": "General",
-                "category": "Uncategorized",
-                "tags": []
-            }
+
+                # Ensure analysis has required fields
+                if analysis and analysis.get("keywords"):
+                    return analysis
+
+            except Exception as e:
+                print(f"Attempt {attempt+1} failed: {e}")
+                print(f"Raw response: {response[:200] if response else 'empty'}")
+
+                # Last attempt failed, raise to outer handler
+                if attempt == max_retries - 1:
+                    raise
+
+        # This should never reach, but just in case
+        return {
+            "keywords": [],
+            "context": "General",
+            "category": "Uncategorized",
+            "tags": []
+        }
 
 class HybridRetriever:
     """Hybrid retrieval system combining BM25 and semantic search."""
@@ -896,13 +915,20 @@ class AgenticMemorySystem:
         
         # Convert to list of memories
         all_memories = list(self.memories.values())
+        all_memory_ids = list(self.memories.keys())
+        # Build ID to index mapping
+        id_to_index = {mid: idx for idx, mid in enumerate(all_memory_ids)}
+
         memory_str = ""
         for i in indices:
             j = 0
             memory_str +=  "talk start time:" + all_memories[i].timestamp + "memory content: " + all_memories[i].content + "memory context: " + all_memories[i].context + "memory keywords: " + str(all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
             neighborhood = all_memories[i].links
             for neighbor in neighborhood:
-                memory_str += "talk start time:" + all_memories[neighbor].timestamp + "memory content: " + all_memories[neighbor].content + "memory context: " + all_memories[neighbor].context + "memory keywords: " + str(all_memories[neighbor].keywords) + "memory tags: " + str(all_memories[neighbor].tags) + "\n"
+                neighbor_idx = id_to_index.get(neighbor)
+                if neighbor_idx is not None:
+                    neighbor_note = all_memories[neighbor_idx]
+                    memory_str += "talk start time:" + neighbor_note.timestamp + "memory content: " + neighbor_note.content + "memory context: " + neighbor_note.context + "memory keywords: " + str(neighbor_note.keywords) + "memory tags: " + str(neighbor_note.tags) + "\n"
                 if j >=k:
                     break
                 j += 1

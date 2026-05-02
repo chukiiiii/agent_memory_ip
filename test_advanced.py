@@ -122,19 +122,23 @@ class advancedMemAgent:
                         }})
         print("response:{}".format(response))
         try:
-            response = json.loads(response)["keywords"]
+            if response and response.strip():
+                response = json.loads(response)["keywords"]
+            else:
+                response = ""
         except:
-            response = response.strip()
+            response = response.strip() if response else ""
         return response
 
     def answer_question(self, question: str, category: int, answer: str) -> str:
         """Generate answer for a question given the conversation context."""
         keywords = self.generate_query_llm(question)
-        # if category == 3:
-        #     raw_context = self.retrieve_memory(keywords,k=10)
-        #     # context = self.retrieve_memory_llm(raw_context, keywords)
-        # else:
-        raw_context = self.retrieve_memory(keywords,k=self.retrieve_k)
+
+        # Use original question as fallback if keywords is empty
+        if not keywords or keywords.strip() == '':
+            keywords = question
+
+        raw_context = self.retrieve_memory(keywords, k=self.retrieve_k)
         context = raw_context
         # print("context:", context)
         # context = self.retrieve_memory_llm(raw_context, question)
@@ -432,6 +436,10 @@ def main():
     
     if args.ratio <= 0.0 or args.ratio > 1.0:
         raise ValueError("Ratio must be between 0.0 and 1.0")
+
+    # Debug: print API settings
+    print(f"[DEBUG] api_key: {args.api_key}")
+    print(f"[DEBUG] api_base: {args.api_base}")
     
     # Convert relative path to absolute path
     dataset_path = os.path.join(os.path.dirname(__file__), args.dataset)
