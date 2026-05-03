@@ -167,8 +167,13 @@ class advancedMemAgent:
             temperature = self.temperature_c5
         elif category == 2:
             user_prompt = f"""
-                            Based on the context: {context}, answer the following question. Use DATE of CONVERSATION to answer with an approximate date.
-                            Please generate the shortest possible answer, using words from the conversation where possible, and avoid using any subjects.   
+                            Based on the context: {context}, answer the following question.
+                            IMPORTANT: For time-related questions (e.g., "When did X happen?"):
+                            - If the context mentions a date and words like "yesterday/last week/next month/the week before X", CALCULATE the actual date
+                            - Example: If conversation date is "25 May 2023" and question asks "the day before", answer is "24 May 2023"
+                            - Example: If conversation says "yesterday" and date context is "8 May", answer is "7 May 2023"
+                            - If question asks "how long ago" or duration, answer with duration like "4 years" not "since 2019"
+                            Please generate the shortest possible answer.
 
                             Question: {question} Short answer:
                             """
