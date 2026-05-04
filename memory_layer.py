@@ -7,6 +7,7 @@ except ImportError:
 import json
 import re
 from datetime import datetime
+from collections import defaultdict
 import uuid
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
@@ -303,7 +304,10 @@ class MemoryNote:
                  llm_controller: Optional[LLMController] = None):
         
         self.content = content
-        
+
+        # Generate id using uuid if not provided
+        self.id = id or str(uuid.uuid4())
+
         # Generate metadata using LLM if not provided and controller is available
         if llm_controller and any(param is None for param in [keywords, context, category, tags]):
             analysis = self.analyze_content(content, llm_controller)
@@ -315,9 +319,16 @@ class MemoryNote:
                 tags = tags or analysis.get("tags", [])
 
         # Set default values for optional parameters
-        self.id = id or str(uuid.uuid4())
-        self.keywords = keywords or []
-        self.links = links or []
+        # New link structure: {"temporal": [], "logical": []}
+        # temporal: 时序相关（同一会话、连续对话）
+        # logical: 逻辑相关（语义关联、因果等）
+        if links is None:
+            self.links = {"temporal": [], "logical": []}
+        elif isinstance(links, list):
+            # Backward compatibility: convert old list format to new dict format
+            self.links = {"temporal": links, "logical": []}
+        else:
+            self.links = links
         self.importance_score = importance_score or 1.0
         self.retrieval_count = retrieval_count or 0
         current_time = datetime.now().strftime("%Y%m%d%H%M")
@@ -332,6 +343,7 @@ class MemoryNote:
         self.evolution_history = evolution_history or []
         self.category = category or "Uncategorized"
         self.tags = tags or []
+        self.keywords = keywords or []
 
     @staticmethod
     def analyze_content(content: str, llm_controller: LLMController) -> Dict:
@@ -783,6 +795,99 @@ class AgenticMemorySystem:
             metadata_text = f"{memory.context} {' '.join(memory.keywords)} {' '.join(memory.tags)}"
             # Add both the content and metadata as separate documents for better retrieval
             self.retriever.add_documents([memory.content + " , " + metadata_text])
+
+    def build_links(self, session_info: Optional[Dict] = None):
+        """Build temporal and logical links between memories.
+
+        Args:
+            session_info: Optional dict mapping memory_id to session_id for temporal link building
+                          Format: {memory_id: session_id}
+        """
+        if not self.memories:
+            print("No memories to build links")
+            return
+
+        print(f"Building links for {len(self.memories)} memories")
+        print(f"session_info: {session_info}")
+
+        all_memory_ids = list(self.memories.keys())
+        all_memories = list(self.memories.values())
+        n = len(all_memory_ids)
+        id_to_index = {mid: idx for idx, mid in enumerate(all_memory_ids)}
+
+        # Build temporal links based on session_info
+        if session_info:
+            # Group memories by session
+            session_to_memory_ids = defaultdict(list)
+            for mid, sid in session_info.items():
+                if mid is None:
+                    continue
+                session_to_memory_ids[sid].append(mid)
+
+            # Connect memories in same session or adjacent sessions (t-1, t+1)
+            for sid, memory_ids in session_to_memory_ids.items():
+                # Same session
+                for i, mid1 in enumerate(memory_ids):
+                    if mid1 not in id_to_index:
+                        continue
+                    idx1 = id_to_index[mid1]
+                    for mid2 in memory_ids[i+1:]:
+                        if mid2 not in id_to_index:
+                            continue
+                        idx2 = id_to_index[mid2]
+                        if idx2 not in self.memories[mid1].links["temporal"]:
+                            self.memories[mid1].links["temporal"].append(idx2)
+                        if idx1 not in self.memories[mid2].links["temporal"]:
+                            self.memories[mid2].links["temporal"].append(idx1)
+
+                # Adjacent sessions (t-1, t+1)
+                adjacent_sids = [sid - 1, sid + 1]
+                for adj_sid in adjacent_sids:
+                    if adj_sid in session_to_memory_ids:
+                        for mid1 in memory_ids:
+                            if mid1 not in id_to_index:
+                                continue
+                            idx1 = id_to_index[mid1]
+                            for mid2 in session_to_memory_ids[adj_sid]:
+                                if mid2 not in id_to_index:
+                                    continue
+                                idx2 = id_to_index[mid2]
+                                if idx2 not in self.memories[mid1].links["temporal"]:
+                                    self.memories[mid1].links["temporal"].append(idx2)
+
+        # Build logical links: for each memory, find top-10 neighbors by embedding similarity
+        # and check if they share logical relationships
+        logical_link_threshold = 0.75  # Similarity threshold for logical link
+        for i, memory in enumerate(all_memories):
+            # Get top-10 neighbors (excluding self)
+            query = memory.content
+            neighbor_indices = self.retriever.search(query, k=min(11, n))
+
+            for neighbor_idx in neighbor_indices:
+                if neighbor_idx == i:
+                    continue
+                if neighbor_idx in memory.links["temporal"]:
+                    # Already linked temporally, skip logical link
+                    continue
+                if neighbor_idx in memory.links["logical"]:
+                    # Already linked, skip
+                    continue
+
+                neighbor = all_memories[neighbor_idx]
+
+                # Check logical relationship: shared keywords (simple heuristic)
+                shared_keywords = set(memory.keywords) & set(neighbor.keywords)
+                if len(shared_keywords) >= 3:
+                    # Add logical link
+                    if neighbor_idx not in memory.links["logical"]:
+                        memory.links["logical"].append(neighbor_idx)
+                    # Bidirectional link
+                    if i not in neighbor.links["logical"]:
+                        neighbor.links["logical"].append(i)
+
+        print(f"Built links: {n} memories processed")
+        for mid, memory in self.memories.items():
+            print(f"  Memory {mid}: temporal={len(memory.links['temporal'])}, logical={len(memory.links['logical'])}")
     
     def process_memory(self, note: MemoryNote) -> bool:
         """Process a memory note and return an evolution label"""
@@ -866,7 +971,11 @@ class AgenticMemorySystem:
                 if action == "strengthen":
                     suggest_connections = response_json["suggested_connections"]
                     new_tags = response_json["tags_to_update"]
-                    note.links.extend(suggest_connections)
+                    # Old format: note.links.extend(suggest_connections)
+                    # New format: links is dict, add to temporal
+                    for conn in suggest_connections:
+                        if conn not in note.links["temporal"]:
+                            note.links["temporal"].append(conn)
                     note.tags = new_tags
                 elif action == "update_neighbor":
                     new_context_neighborhood = response_json["new_context_neighborhood"]
@@ -908,34 +1017,69 @@ class AgenticMemorySystem:
             memory_str += "memory index:" + str(i) + "\t talk start time:" + all_memories[i].timestamp + "\t memory content: " + all_memories[i].content + "\t memory context: " + all_memories[i].context + "\t memory keywords: " + str(all_memories[i].keywords) + "\t memory tags: " + str(all_memories[i].tags) + "\n"
         return memory_str, indices
 
-    def find_related_memories_raw(self, query: str, k: int = 5) -> List[MemoryNote]:
-        """Find related memories using hybrid retrieval"""
+    def find_related_memories_raw(self, query: str, k: int = 5, category: int = None) -> str:
+        """Find related memories using hybrid retrieval with category-aware link strategies.
+
+        Args:
+            query: Query string
+            k: Number of base memories to retrieve
+            category: Question category (1-5) for link strategy selection
+
+        Link strategy:
+            1: ["logical"]      # 属性问题
+            2: ["temporal"]     # 时间问题 ← 时序关系更重要
+            3: ["logical"]      # 意图推断
+            4: ["temporal", "logical"]  # 多跳推理
+            5: []               # 是非问题（只用基础召回）
+        """
+        # Category to link type mapping
+        CATEGORY_LINK_STRATEGY = {
+            1: ["logical"],
+            2: ["temporal"],
+            3: ["logical"],
+            4: ["temporal", "logical"],
+            5: []  # No link expansion for category 5
+        }
+
+        if category is None:
+            category = 5  # Default to no link (use basic retrieval)
+
+        link_types = CATEGORY_LINK_STRATEGY.get(category, [])
+
         if not self.memories:
-            return []
-            
+            return ""
+
         # Get indices of related memories
-        # indices = self.retriever.retrieve(query_note.content, k)
         indices = self.retriever.search(query, k)
-        
+
         # Convert to list of memories
         all_memories = list(self.memories.values())
         all_memory_ids = list(self.memories.keys())
         # Build ID to index mapping
         id_to_index = {mid: idx for idx, mid in enumerate(all_memory_ids)}
 
+        # Use a set to avoid duplicate memories
+        seen_indices = set()
         memory_str = ""
+
         for i in indices:
-            j = 0
-            memory_str +=  "talk start time:" + all_memories[i].timestamp + "memory content: " + all_memories[i].content + "memory context: " + all_memories[i].context + "memory keywords: " + str(all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
-            neighborhood = all_memories[i].links
-            for neighbor in neighborhood:
-                neighbor_idx = id_to_index.get(neighbor)
-                if neighbor_idx is not None:
-                    neighbor_note = all_memories[neighbor_idx]
-                    memory_str += "talk start time:" + neighbor_note.timestamp + "memory content: " + neighbor_note.content + "memory context: " + neighbor_note.context + "memory keywords: " + str(neighbor_note.keywords) + "memory tags: " + str(neighbor_note.tags) + "\n"
-                if j >=k:
-                    break
-                j += 1
+            if i in seen_indices:
+                continue
+            seen_indices.add(i)
+
+            memory_str += "talk start time:" + all_memories[i].timestamp + "memory content: " + all_memories[i].content + "memory context: " + all_memories[i].context + "memory keywords: " + str(all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
+
+            # Expand via links based on category strategy
+            if link_types:
+                for link_type in link_types:
+                    link_neighbors = all_memories[i].links.get(link_type, [])
+                    for neighbor_idx in link_neighbors:
+                        if neighbor_idx in seen_indices:
+                            continue
+                        seen_indices.add(neighbor_idx)
+                        neighbor_note = all_memories[neighbor_idx]
+                        memory_str += "talk start time:" + neighbor_note.timestamp + "memory content: " + neighbor_note.content + "memory context: " + neighbor_note.context + "memory keywords: " + str(neighbor_note.keywords) + "memory tags: " + str(neighbor_note.tags) + "\n"
+
         return memory_str
 
 def run_tests():

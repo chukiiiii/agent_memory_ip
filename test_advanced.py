@@ -60,8 +60,8 @@ class advancedMemAgent:
     def add_memory(self, content, time=None):
         self.memory_system.add_note(content, time=time)
 
-    def retrieve_memory(self, content, k=10):
-        return self.memory_system.find_related_memories_raw(content, k=k)
+    def retrieve_memory(self, content, k=10, category=None):
+        return self.memory_system.find_related_memories_raw(content, k=k, category=category)
     
     def retrieve_memory_llm(self, memories_text, query):
         prompt = f"""Given the following conversation memories and a question, select the most relevant parts of the conversation that would help answer the question. Include the date/time if available.
@@ -141,7 +141,8 @@ class advancedMemAgent:
         if not keywords or keywords.strip() == '':
             keywords = question
 
-        raw_context = self.retrieve_memory(keywords, k=self.retrieve_k)
+        # Pass category to enable link-based retrieval strategy
+        raw_context = self.retrieve_memory(keywords, k=self.retrieve_k, category=category)
         context = raw_context
         # print("context:", context)
         # context = self.retrieve_memory_llm(raw_context, question)
@@ -323,16 +324,22 @@ def evaluate_dataset(dataset_path: str, model: str, output_path: Optional[str] =
             logger.info(f"No cached memories found for sample {sample_idx}. Creating new memories.")
             cached_memories = None
 
-            for _,turns in sample.conversation.sessions.items():
+            # Build session_info for temporal link building: {memory_id: session_id}
+            session_info = {}
+
+            # Track memory creation order to build memory_id -> turn mapping
+            for session_id, turns in sample.conversation.sessions.items():
                 for turn in turns.turns:
                     turn_datatime = turns.date_time
                     conversation_tmp = "Speaker "+ turn.speaker + "says : " + turn.text
-                    agent.add_memory(conversation_tmp,time=turn_datatime)
+                    memory_id = agent.add_memory(conversation_tmp, time=turn_datatime)
+                    # Map memory_id to session_id for temporal links
+                    session_info[memory_id] = session_id
                     # break
-                #     i +=1
-                #     if i>2:
-                #         break
-                # break
+
+            # Build temporal and logical links after all memories are added
+            agent.memory_system.build_links(session_info=session_info)
+
             memories_to_cache = agent.memory_system.memories
             with open(memory_cache_file, 'wb') as f:
                 pickle.dump(memories_to_cache, f)
