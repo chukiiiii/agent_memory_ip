@@ -100,11 +100,11 @@ class advancedMemAgent:
 
                 Question: {question}
 
-                Format your response as a JSON object with a "keywords" field containing the selected text. 
+                Format your response as a JSON object with a "keywords" field containing the selected text.
 
                 Example response format:
                 {{"keywords": "keyword1, keyword2, keyword3"}}"""
-            
+
             # Get LLM response
         response = self.retriever_llm.llm.get_completion(prompt,response_format={"type": "json_schema", "json_schema": {
                             "name": "response",
@@ -123,12 +123,15 @@ class advancedMemAgent:
         print("response:{}".format(response))
         try:
             if response and response.strip():
-                response = json.loads(response)["keywords"]
+                keywords_from_llm = json.loads(response)["keywords"]
             else:
-                response = ""
+                keywords_from_llm = ""
         except:
-            response = response.strip() if response else ""
-        return response
+            keywords_from_llm = response.strip() if response else ""
+
+        # 加上question本身，确保不会遗漏
+        combined = keywords_from_llm + " | " + question if keywords_from_llm else question
+        return combined
 
     def answer_question(self, question: str, category: int, answer: str) -> str:
         """Generate answer for a question given the conversation context."""
@@ -182,6 +185,16 @@ class advancedMemAgent:
                             Based on the context: {context}, write an answer in the form of a short phrase for the following question. Answer with exact words from the context whenever possible.
 
                             Question: {question} Short answer:
+                            """
+        elif category == 4:
+            user_prompt = f"""
+                            Based on the context: {context}
+                            For this question requiring a list of items, output the items as a comma-separated list.
+                            Use EXACT words from the context - do NOT add explanation.
+                            Example: "pottery, camping, painting"
+
+                            Question: {question}
+                            Short answer:
                             """
         else:
             user_prompt = f"""Based on the context: {context}, write an answer in the form of a short phrase for the following question. Answer with exact words from the context whenever possible.

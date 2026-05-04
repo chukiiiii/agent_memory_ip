@@ -581,6 +581,10 @@ class HybridRetriever:
         top_k_indices = np.argsort(hybrid_scores)[-k:][::-1]
         return top_k_indices.tolist()
 
+    def search(self, query: str, k: int = 5):
+        """Search using hybrid scoring, returns indices (compatible with SimpleEmbeddingRetriever API)"""
+        return self.retrieve(query, k)
+
 class SimpleEmbeddingRetriever:
     """Simple retrieval system using only text embeddings."""
     
@@ -705,7 +709,7 @@ class AgenticMemorySystem:
                  sglang_host: str = "http://localhost",
                  sglang_port: int = 30000):
         self.memories = {}  # id -> MemoryNote
-        self.retriever = SimpleEmbeddingRetriever(model_name)
+        self.retriever = SimpleEmbeddingRetriever(model_name)  # 纯语义检索
         self.llm_controller = LLMController(llm_backend, llm_model, api_key, api_base, sglang_host, sglang_port)
         self.evolution_system_prompt = '''
                                 You are an AI memory evolution agent responsible for managing and evolving a knowledge base.
