@@ -15,15 +15,15 @@ Original A-Mem stores all memory relations (temporal, semantic, causal) in a sin
 ## Test Commands
 
 ```bash
-# Quick test (1/10 of LoCoMo, ~200 QA pairs)
-python test_advanced.py --ratio 0.1
+# Quick test 
+python test_advanced.py
 
 # Full test
 python test_advanced.py
 
 # Robust version (supports openai/vllm/ollama backends)
-python test_advanced_robust.py --backend openai --model gpt-4o-mini \
-    --dataset data/locomo10.json --ratio 0.1
+python test_advanced_robust.py --backend [your backend] --model [your model] \
+    --dataset data/locomo10.json 
 
 # Analyze results
 python analyze_results.py <log_file>
