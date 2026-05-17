@@ -1166,13 +1166,18 @@ class AgenticMemorySystem:
         if category is None:
             category = 5
 
+        if category is not None:
+            base_k = k * 2 if category == 5 else k
+        else:
+            base_k = k
+
         layers = EXPANSION_STRATEGY.get(category, [])
 
         if not self.memories:
             return ""
 
         # Base retrieval
-        indices = self.retriever.search(query, k)
+        indices = self.retriever.search(query, base_k)
         all_memories = list(self.memories.values())
 
         def _fmt(m, idx):
