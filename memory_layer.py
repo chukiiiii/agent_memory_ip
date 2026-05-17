@@ -746,6 +746,7 @@ class AgenticMemorySystem:
         self.memories = {}  # id -> MemoryNote
         self.retriever = SimpleEmbeddingRetriever(model_name)  # 纯语义检索
         self.llm_controller = LLMController(llm_backend, llm_model, api_key, api_base, sglang_host, sglang_port)
+        self.cross_encoder = None  # lazy load on first reranking
         self.evolution_system_prompt = '''
                                 You are an AI memory evolution agent responsible for managing and evolving a knowledge base.
                                 Analyze the the new memory note according to keywords and context, also with their several nearest neighbors memory.
@@ -1151,14 +1152,15 @@ class AgenticMemorySystem:
         Multi-layer reasoning paths per category:
             1: [entity]                              # 属性 → 同实体跳转
             2: [temporal]                            # 时间 → 时序回溯
-            3: [causality → elaboration]             # 意图 → 因果链 + 细节补充
+            3: [entity+causality → elaboration]      # 意图 → 实体+因果 + 细节补充
             4: [temporal+entity → causality]         # 多跳 → 时序+实体 + 因果传播
             5: []                                    # 是非 → 无展开
+        After expansion, all collected memories are reranked by a cross-encoder.
         """
         EXPANSION_STRATEGY = {
             1: [{"entity": 3}],
             2: [{"temporal": 5}],
-            3: [{"causality": 3}, {"elaboration": 3}],
+            3: [{"entity": 3, "causality": 3}, {"elaboration": 3}],
             4: [{"temporal": 3, "entity": 3}, {"causality": 3}],
             5: []
         }
@@ -1186,16 +1188,14 @@ class AgenticMemorySystem:
                     f"memory tags: {str(m.tags)}\n")
 
         seen_indices = set()
-        memory_str = ""
 
-        # Add base retrieval results
+        # Collect base retrieval results
         for i in indices:
             if i in seen_indices:
                 continue
             seen_indices.add(i)
-            memory_str += _fmt(all_memories[i], i)
 
-        # Multi-layer expansion
+        # Multi-layer expansion - collect linked memories
         current_frontier = list(indices)
         for layer_idx, layer in enumerate(layers):
             new_frontier = set()
@@ -1212,11 +1212,37 @@ class AgenticMemorySystem:
                             continue
                         seen_indices.add(n_idx)
                         new_frontier.add(n_idx)
-                        memory_str += _fmt(all_memories[n_idx], n_idx)
                         added += 1
                         if max_nodes > 0 and added >= max_nodes:
                             break
             current_frontier = list(new_frontier)
+
+        # Cross-encoder reranking (skip for C2 time and C4 multi-hop — breaks temporal/multi-hop chains)
+        reranked = list(seen_indices)
+        if len(reranked) > 1 and category in (1, 3, 5):
+            if self.cross_encoder is None:
+                try:
+                    from sentence_transformers import CrossEncoder
+                    self.cross_encoder = CrossEncoder(
+                        'cross-encoder/ms-marco-MiniLM-L-6-v2',
+                        default_activation_function=None  # raw logits
+                    )
+                except Exception as e:
+                    print(f"Cross-encoder loading failed, skipping rerank: {e}")
+                    self.cross_encoder = False
+
+            if self.cross_encoder and self.cross_encoder is not False:
+                try:
+                    pairs = [(query, all_memories[i].content[:512]) for i in reranked]
+                    scores = self.cross_encoder.predict(pairs, show_progress_bar=False)
+                    reranked = [idx for idx, _ in sorted(zip(reranked, scores), key=lambda x: -x[1])]
+                except Exception as e:
+                    print(f"Reranking failed, using original order: {e}")
+
+        # Format results in reranked order
+        memory_str = ""
+        for i in reranked:
+            memory_str += _fmt(all_memories[i], i)
 
         return memory_str
 
