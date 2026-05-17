@@ -37,5 +37,3 @@ python analyze_results.py <log_file>
 | + Temporal/Logical (keyword) | 0.3121 |
 | + Temporal/Logical (LLM) | 0.3205 |
 | **MRMG (full)** | **0.3597** |
-
-> Note: This is an exploratory study on link type differentiation. Results are vs. the A-Mem baseline only; not compared against MemGPT, GraphRAG, etc.
