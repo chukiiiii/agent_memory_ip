@@ -288,7 +288,7 @@ class LLMController:
 
 class MemoryNote:
     """Basic memory unit with metadata"""
-    def __init__(self, 
+    def __init__(self,
                  content: str,
                  id: Optional[str] = None,
                  keywords: Optional[List[str]] = None,
@@ -297,19 +297,20 @@ class MemoryNote:
                  retrieval_count: Optional[int] = None,
                  timestamp: Optional[str] = None,
                  last_accessed: Optional[str] = None,
-                 context: Optional[str] = None, 
+                 context: Optional[str] = None,
                  evolution_history: Optional[List] = None,
                  category: Optional[str] = None,
                  tags: Optional[List[str]] = None,
+                 entities: Optional[List[str]] = None,
                  llm_controller: Optional[LLMController] = None):
-        
+
         self.content = content
 
         # Generate id using uuid if not provided
         self.id = id or str(uuid.uuid4())
 
         # Generate metadata using LLM if not provided and controller is available
-        if llm_controller and any(param is None for param in [keywords, context, category, tags]):
+        if llm_controller and any(param is None for param in [keywords, context, category, tags, entities]):
             analysis = self.analyze_content(content, llm_controller)
             print("analysis", analysis)
             # Handle empty or failed analysis
@@ -317,16 +318,23 @@ class MemoryNote:
                 keywords = keywords or analysis.get("keywords", [])
                 context = context or analysis.get("context", "General")
                 tags = tags or analysis.get("tags", [])
+                entities = entities or analysis.get("entities", [])
 
         # Set default values for optional parameters
-        # New link structure: {"temporal": [], "logical": []}
-        # temporal: 时序相关（同一会话、连续对话）
-        # logical: 逻辑相关（语义关联、因果等）
+        # Multi-relational link structure:
+        # - temporal: 时序相关（同一会话、连续对话）
+        # - logical.entity: 同实体/同主题
+        # - logical.causality: 因果/演化
+        # - logical.elaboration: 细化/补充
         if links is None:
-            self.links = {"temporal": [], "logical": []}
+            self.links = {"temporal": [], "logical": {"entity": [], "causality": [], "elaboration": []}}
         elif isinstance(links, list):
-            # Backward compatibility: convert old list format to new dict format
-            self.links = {"temporal": links, "logical": []}
+            # Backward compatibility: old list format
+            self.links = {"temporal": links, "logical": {"entity": [], "causality": [], "elaboration": []}}
+        elif isinstance(links, dict) and "logical" in links and isinstance(links["logical"], list):
+            # Convert old dict format (logical: [...]) to new dict format (logical: {...})
+            old_logical = links["logical"]
+            self.links = {"temporal": links.get("temporal", []), "logical": {"entity": old_logical, "causality": [], "elaboration": []}}
         else:
             self.links = links
         self.importance_score = importance_score or 1.0
@@ -334,24 +342,26 @@ class MemoryNote:
         current_time = datetime.now().strftime("%Y%m%d%H%M")
         self.timestamp = timestamp or current_time
         self.last_accessed = last_accessed or current_time
-        
+
         # Handle context that can be either string or list
         self.context = context or "General"
         if isinstance(self.context, list):
             self.context = " ".join(self.context)  # Convert list to string by joining
-            
+
         self.evolution_history = evolution_history or []
         self.category = category or "Uncategorized"
         self.tags = tags or []
         self.keywords = keywords or []
+        self.entities = entities or []
 
     @staticmethod
     def analyze_content(content: str, llm_controller: LLMController) -> Dict:
-        """Analyze content to extract keywords, context, and other metadata (with retry)"""
+        """Analyze content to extract keywords, context, tags, and entities (with retry)"""
         prompt = """Generate a structured analysis of the following content by:
             1. Identifying the most salient keywords (focus on nouns, verbs, and key concepts)
             2. Extracting core themes and contextual elements
             3. Creating relevant categorical tags
+            4. Extracting key entities (specific people names, organizations, locations, events, objects)
 
             Format the response as a JSON object:
             {
@@ -371,6 +381,12 @@ class MemoryNote:
                     // several broad categories/themes for classification
                     // Include domain, format, and type tags
                     // At least three tags, but don't be too redundant.
+                ],
+                "entities": [
+                    // specific named entities mentioned: people, organizations, locations, events
+                    // Extract REAL proper nouns and specific concepts from the content
+                    // Examples: "LGBTQ support group", "Caroline", "adoption agency", "Pride parade"
+                    // At least one entity, focus on what's actually mentioned
                 ]
             }
 
@@ -400,8 +416,14 @@ class MemoryNote:
                                         "type": "string"
                                     }
                                 },
+                                "entities": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
                             },
-                            "required": ["keywords", "context", "tags"],
+                            "required": ["keywords", "context", "tags", "entities"],
                             "additionalProperties": False
                         },
                         "strict": True
@@ -439,7 +461,8 @@ class MemoryNote:
             "keywords": [],
             "context": "General",
             "category": "Uncategorized",
-            "tags": []
+            "tags": [],
+            "entities": []
         }
 
 class HybridRetriever:
@@ -765,7 +788,7 @@ class AgenticMemorySystem:
         # all_docs = [m.content for m in self.memories.values()]
         evo_label, note = self.process_memory(note)
         self.memories[note.id] = note
-        self.retriever.add_documents(["content:" + note.content + " context:" + note.context + " keywords: " + ", ".join(note.keywords) + " tags: " + ", ".join(note.tags)])
+        self.retriever.add_documents(["content:" + note.content + " context:" + note.context + " keywords: " + ", ".join(note.keywords) + " tags: " + ", ".join(note.tags) + " entities: " + ", ".join(note.entities)])
         if evo_label == True:
             self.evo_cnt += 1
             if self.evo_cnt % self.evo_threshold == 0:
@@ -792,7 +815,7 @@ class AgenticMemorySystem:
         # Re-add all memory documents with their metadata
         for memory in self.memories.values():
             # Combine memory metadata into a single searchable document
-            metadata_text = f"{memory.context} {' '.join(memory.keywords)} {' '.join(memory.tags)}"
+            metadata_text = f"{memory.context} {' '.join(memory.keywords)} {' '.join(memory.tags)} {' '.join(memory.entities)}"
             # Add both the content and metadata as separate documents for better retrieval
             self.retriever.add_documents([memory.content + " , " + metadata_text])
 
@@ -855,39 +878,144 @@ class AgenticMemorySystem:
                                 if idx2 not in self.memories[mid1].links["temporal"]:
                                     self.memories[mid1].links["temporal"].append(idx2)
 
-        # Build logical links: for each memory, find top-10 neighbors by embedding similarity
-        # and check if they share logical relationships
-        logical_link_threshold = 0.75  # Similarity threshold for logical link
+        # Build entity links based on shared entities
         for i, memory in enumerate(all_memories):
-            # Get top-10 neighbors (excluding self)
-            query = memory.content
-            neighbor_indices = self.retriever.search(query, k=min(11, n))
+            for j in range(i + 1, n):
+                shared = set(memory.entities or []) & set(all_memories[j].entities or [])
+                if len(shared) >= 1:
+                    if j not in memory.links["logical"]["entity"]:
+                        memory.links["logical"]["entity"].append(j)
+                    if i not in all_memories[j].links["logical"]["entity"]:
+                        all_memories[j].links["logical"]["entity"].append(i)
 
-            for neighbor_idx in neighbor_indices:
-                if neighbor_idx == i:
+        # Build causality + elaboration links via LLM judgment on candidate pairs
+        candidates = []
+        all_contents = [m.content for m in all_memories]
+        embeddings = self.retriever.model.encode(all_contents)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if j in self._get_links(all_memories[i], "temporal"):
                     continue
-                if neighbor_idx in memory.links["temporal"]:
-                    # Already linked temporally, skip logical link
-                    continue
-                if neighbor_idx in memory.links["logical"]:
-                    # Already linked, skip
-                    continue
+                sim = cosine_similarity([embeddings[i]], [embeddings[j]])[0][0]
+                if sim >= 0.5:
+                    candidates.append((i, j, sim))
 
-                neighbor = all_memories[neighbor_idx]
+        # Sort by similarity descending and cap at 3x memory count
+        candidates.sort(key=lambda x: -x[2])
+        candidates = candidates[:min(len(candidates), n * 3)]
 
-                # Check logical relationship: shared keywords (simple heuristic)
-                shared_keywords = set(memory.keywords) & set(neighbor.keywords)
-                if len(shared_keywords) >= 3:
-                    # Add logical link
-                    if neighbor_idx not in memory.links["logical"]:
-                        memory.links["logical"].append(neighbor_idx)
-                    # Bidirectional link
-                    if i not in neighbor.links["logical"]:
-                        neighbor.links["logical"].append(i)
+        # Batch LLM judgment
+        batch_size = 10
+        for batch_start in range(0, len(candidates), batch_size):
+            batch = candidates[batch_start:batch_start + batch_size]
+            relationships = self._judge_relationships_batch(batch, all_memories)
+            for (i, j, _), rel in zip(batch, relationships):
+                if rel == "causality":
+                    all_memories[i].links["logical"]["causality"].append(j)
+                    all_memories[j].links["logical"]["causality"].append(i)
+                elif rel == "elaboration":
+                    all_memories[i].links["logical"]["elaboration"].append(j)
+                    all_memories[j].links["logical"]["elaboration"].append(i)
 
         print(f"Built links: {n} memories processed")
         for mid, memory in self.memories.items():
-            print(f"  Memory {mid}: temporal={len(memory.links['temporal'])}, logical={len(memory.links['logical'])}")
+            temporal_cnt = len(memory.links["temporal"])
+            entity_cnt = len(memory.links["logical"]["entity"])
+            causality_cnt = len(memory.links["logical"]["causality"])
+            elaboration_cnt = len(memory.links["logical"]["elaboration"])
+            print(f"  Memory {mid}: temporal={temporal_cnt}, entity={entity_cnt}, causality={causality_cnt}, elaboration={elaboration_cnt}")
+
+    @staticmethod
+    def _parse_timestamp(ts):
+        """Parse timestamp string to comparable format."""
+        if not ts:
+            return None
+        try:
+            return datetime.strptime(ts, "%Y%m%d%H%M")
+        except (ValueError, TypeError):
+            pass
+        try:
+            return datetime.strptime(ts, "%I:%M %p on %d %B, %Y")
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    def _get_links(self, memory, link_type):
+        """Get neighbor indices by link type from a memory note."""
+        if link_type == "temporal":
+            return memory.links.get("temporal", [])
+        elif link_type in ("entity", "causality", "elaboration"):
+            return memory.links.get("logical", {}).get(link_type, [])
+        return []
+
+    def _judge_relationships_batch(self, candidate_pairs, all_memories):
+        """LLM batch judgment for causality/elaboration relationships."""
+        if not candidate_pairs:
+            return []
+
+        pair_texts = []
+        for idx, (i, j, sim) in enumerate(candidate_pairs):
+            mem_i = all_memories[i]
+            mem_j = all_memories[j]
+            pair_texts.append(
+                f"--- Pair {idx} ---\n"
+                f"Memory A (earlier): {mem_i.content}\n"
+                f"Memory B (later): {mem_j.content}\n"
+            )
+
+        prompt = (
+            "Given the following pairs of conversation memories. "
+            "For each pair, Memory A happened BEFORE Memory B.\n\n"
+            "Classify the relationship as one of:\n"
+            '- "causality": Memory B is a direct consequence, result, or logical follow-through of Memory A\n'
+            '- "elaboration": Memory B provides more details, specifics, or a concrete follow-up action about the topics in Memory A\n'
+            '- "none": No special causal/detail relationship beyond general topical relevance\n\n'
+            + "\n".join(pair_texts)
+        )
+
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "relationships",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "relationships": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "pair_index": {"type": "integer"},
+                                    "relationship": {
+                                        "type": "string",
+                                        "enum": ["causality", "elaboration", "none"]
+                                    }
+                                },
+                                "required": ["pair_index", "relationship"],
+                                "additionalProperties": False
+                            }
+                        }
+                    },
+                    "required": ["relationships"],
+                    "additionalProperties": False
+                },
+                "strict": True
+            }
+        }
+
+        try:
+            response = self.llm_controller.llm.get_completion(prompt, response_format)
+            response_cleaned = response.strip()
+            if not response_cleaned.startswith('{'):
+                start = response_cleaned.find('{')
+                if start >= 0:
+                    response_cleaned = response_cleaned[start:]
+            result = json.loads(response_cleaned)
+            rel_map = {r["pair_index"]: r["relationship"] for r in result.get("relationships", [])}
+            return [rel_map.get(idx, "none") for idx in range(len(candidate_pairs))]
+        except Exception as e:
+            print(f"Relationship judgment batch error: {e}")
+            return ["none"] * len(candidate_pairs)
     
     def process_memory(self, note: MemoryNote) -> bool:
         """Process a memory note and return an evolution label"""
@@ -1018,67 +1146,72 @@ class AgenticMemorySystem:
         return memory_str, indices
 
     def find_related_memories_raw(self, query: str, k: int = 5, category: int = None) -> str:
-        """Find related memories using hybrid retrieval with category-aware link strategies.
+        """Find related memories with multi-layer graph expansion.
 
-        Args:
-            query: Query string
-            k: Number of base memories to retrieve
-            category: Question category (1-5) for link strategy selection
-
-        Link strategy:
-            1: ["logical"]      # 属性问题
-            2: ["temporal"]     # 时间问题 ← 时序关系更重要
-            3: ["logical"]      # 意图推断
-            4: ["temporal", "logical"]  # 多跳推理
-            5: []               # 是非问题（只用基础召回）
+        Multi-layer reasoning paths per category:
+            1: [entity]                              # 属性 → 同实体跳转
+            2: [temporal]                            # 时间 → 时序回溯
+            3: [causality → elaboration]             # 意图 → 因果链 + 细节补充
+            4: [temporal+entity → causality]         # 多跳 → 时序+实体 + 因果传播
+            5: []                                    # 是非 → 无展开
         """
-        # Category to link type mapping
-        CATEGORY_LINK_STRATEGY = {
-            1: ["logical"],
-            2: ["temporal"],
-            3: ["logical"],
-            4: ["temporal", "logical"],
-            5: []  # No link expansion for category 5
+        EXPANSION_STRATEGY = {
+            1: [{"entity": 3}],
+            2: [{"temporal": 5}],
+            3: [{"causality": 3}, {"elaboration": 3}],
+            4: [{"temporal": 3, "entity": 3}, {"causality": 3}],
+            5: []
         }
 
         if category is None:
-            category = 5  # Default to no link (use basic retrieval)
+            category = 5
 
-        link_types = CATEGORY_LINK_STRATEGY.get(category, [])
+        layers = EXPANSION_STRATEGY.get(category, [])
 
         if not self.memories:
             return ""
 
-        # Get indices of related memories
+        # Base retrieval
         indices = self.retriever.search(query, k)
-
-        # Convert to list of memories
         all_memories = list(self.memories.values())
-        all_memory_ids = list(self.memories.keys())
-        # Build ID to index mapping
-        id_to_index = {mid: idx for idx, mid in enumerate(all_memory_ids)}
 
-        # Use a set to avoid duplicate memories
+        def _fmt(m, idx):
+            return (f"talk start time:{m.timestamp}memory content: {m.content}"
+                    f"memory context: {m.context}memory keywords: {str(m.keywords)}"
+                    f"memory tags: {str(m.tags)}\n")
+
         seen_indices = set()
         memory_str = ""
 
+        # Add base retrieval results
         for i in indices:
             if i in seen_indices:
                 continue
             seen_indices.add(i)
+            memory_str += _fmt(all_memories[i], i)
 
-            memory_str += "talk start time:" + all_memories[i].timestamp + "memory content: " + all_memories[i].content + "memory context: " + all_memories[i].context + "memory keywords: " + str(all_memories[i].keywords) + "memory tags: " + str(all_memories[i].tags) + "\n"
-
-            # Expand via links based on category strategy
-            if link_types:
-                for link_type in link_types:
-                    link_neighbors = all_memories[i].links.get(link_type, [])
-                    for neighbor_idx in link_neighbors:
-                        if neighbor_idx in seen_indices:
+        # Multi-layer expansion
+        current_frontier = list(indices)
+        for layer_idx, layer in enumerate(layers):
+            new_frontier = set()
+            for src_idx in current_frontier:
+                if src_idx >= len(all_memories):
+                    continue
+                for link_type, max_nodes in layer.items():
+                    neighbors = self._get_links(all_memories[src_idx], link_type)
+                    added = 0
+                    for n_idx in neighbors:
+                        if n_idx in seen_indices:
                             continue
-                        seen_indices.add(neighbor_idx)
-                        neighbor_note = all_memories[neighbor_idx]
-                        memory_str += "talk start time:" + neighbor_note.timestamp + "memory content: " + neighbor_note.content + "memory context: " + neighbor_note.context + "memory keywords: " + str(neighbor_note.keywords) + "memory tags: " + str(neighbor_note.tags) + "\n"
+                        if n_idx >= len(all_memories):
+                            continue
+                        seen_indices.add(n_idx)
+                        new_frontier.add(n_idx)
+                        memory_str += _fmt(all_memories[n_idx], n_idx)
+                        added += 1
+                        if max_nodes > 0 and added >= max_nodes:
+                            break
+            current_frontier = list(new_frontier)
 
         return memory_str
 
