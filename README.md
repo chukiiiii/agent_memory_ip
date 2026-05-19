@@ -1,5 +1,6 @@
 # Multi-Relational Memory Graph (MRMG)
-
+CAI XINYI
+MSBD6910A INDEPENDENT PROJECT
 An exploration of typed memory link structures for long-context dialogue retrieval, built on the [A-Mem](https://arxiv.org/pdf/2502.12110) framework.
 
 ## Topic
